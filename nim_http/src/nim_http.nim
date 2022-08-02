@@ -23,24 +23,24 @@ type
     ok: bool
     message: string
 
-  Response = object
-    httpCode: HttpCode
-    headers: HttpHeaders
-    stream: Stream
-    socket: Socket
+  Response* = object
+    httpCode*: HttpCode
+    headers*: HttpHeaders
+    stream*: Stream
+    socket*: Socket
 
-  AsyncResponse = object
-    httpCode: HttpCode
-    headers: HttpHeaders
-    stream: Stream
-    socket: AsyncSocket
+  AsyncResponse* = object
+    httpCode*: HttpCode
+    headers*: HttpHeaders
+    stream*: Stream
+    socket*: AsyncSocket
 
   Chunk = object
     size: int
     ext: HttpHeaders
     data: string
 
-  HttpError = object of IOError
+  HttpError* = object of IOError
 
 
 proc initAsyncUnixSocket*(uri: Uri | string): Future[AsyncSocket] {.async.} =
@@ -88,18 +88,22 @@ proc sendGreeting(socket: Socket | AsyncSocket, httpMethod: HttpMethod,
 proc sendHeaders(socket: Socket | AsyncSocket, headers: HttpHeaders): Future[
     void] {.multisync.} =
   for key, value in headers:
-    when defined(verbose): echo "h> ", key, ": ", value
-    await socket.send(key & ": " & value & "\r\n")
+    let message = key & ": " & value
+    when defined(verbose): echo "h> " & message
+    await socket.send(message & "\r\n")
+  when defined(verbose): echo "h>\\r\\n"
   await socket.send("\r\n")
 
 proc sendBody(socket: Socket | AsyncSocket, body: string): Future[
     void] {.multisync.} =
   # TODO: chunked encoding
+  when defined(verbose): echo "b> ", body
   await socket.send(body)
 
 proc recvGreeting(socket: Socket | AsyncSocket): Future[
     Greeting] {.multisync.} =
   var line = await socket.recvLine()
+  when defined(verbose): echo "g< ", line
   var parts = line.split(" ")
   if not parts.len >= 3:
     raise newException(HttpError, "Invalid greeting: " & line)
@@ -223,14 +227,18 @@ proc fetch*(
   if not headers.hasKey("Host"):
     headers.add("Host", uri.hostname)
 
+  # make sure we have a host header
+  if body != "":
+    headers["Content-length"] = $body.len
+
   # construct path
   var path = if uri.path == "": "/" else: uri.path
   path = if uri.query != "": path & "?" & uri.query else: path
 
   await socket.sendGreeting(httpMethod, path)
   await socket.sendHeaders(headers)
-  await socket.sendBody(body)
-
+  if body != "":
+    await socket.sendBody(body)
 
   let greeting = await socket.recvGreeting()
   let headers = await socket.recvHeaders()
