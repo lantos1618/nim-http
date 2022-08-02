@@ -28,6 +28,7 @@ type
     headers: HttpHeaders
     stream: Stream
     socket: Socket
+
   AsyncResponse = object
     httpCode: HttpCode
     headers: HttpHeaders
@@ -59,8 +60,6 @@ proc initUnixSocket*(uri: Uri | string): Socket =
     Protocol.IPPROTO_IP
   )
   result.connectUnix(uri.hostname)
-
-
 
 proc initSocket(uri: Uri): Socket =
   var uri = uri
@@ -143,27 +142,41 @@ proc recvChunk*(socket: Socket | AsyncSocket): Future[Chunk] {.multisync.} =
   if expectedNewLine != "\r\n":
     raise newException(HttpError, "expected \\r\\n but got: " & expectedNewLine)
 
-iterator recvData*(response: Response | AsyncResponse): string =
-  ## iterator over the data of the response
-  ## if you want to work with streams use recvStream instead which implements this iterator
-  var chunked = response.headers.getOrDefault("Transfer-Encoding").contains("chunked")
+proc recvData*(response: Response | AsyncResponse): Future[string] {.multisync.} =
+  ## recv one part of return data
+  ## use proc body() to get all data
+  ## use iterator body() to stream data from chunks
+ var chunked = response.headers.getOrDefault("Transfer-Encoding").contains("chunked")
   var contentLength = if response.headers.hasKey("Content-Length"): response.headers["Content-Length"].parseInt() else: -1
   if chunked:
-    var chunk = when response is Response: response.socket.recvChunk() else: waitFor response.socket.recvChunk()
-    while chunk.size > 0 and chunk.data != "\r\n":
-      yield chunk.data
-      chunk = when response is Response: response.socket.recvChunk() else: waitFor response.socket.recvChunk()
-  elif  contentLength > 0: 
-    let line = when response is Response: response.socket.recv(contentLength) else: waitFor response.socket.recv(contentLength)
+    var chunk = await response.socket.recvChunk()
+    return chunk
+  
+  if contentLength > 0: 
+    let line = await response.socket.recv(contentLength)
     when defined(verbose): echo "cl< ", cast[seq[char]](line)
+    return line
+
+  while true:
+    let line = await response.socket.recvLine()
+    when defined(verbose): echo "r< ", cast[seq[char]](line)
+    if line.len == 0 or line == "\r\n":
+      break
+    return line
+
+iterator body*(response: Response | AsyncResponse): string =
+  ## iterator over the data of the response
+  ## if you want to work with streams use recvStream instead which implements this iterator
+  while true:
+    let line = when response is Response: response.recvData() else: waitFor response.recvData()
+    if line.len == 0 or line.data in ["", "\r\n"]:
+      break
     yield line
-  else:
-    while true:
-      let line = when response is Response: response.socket.recvLine() else: waitFor response.socket.recvLine()
-      when defined(verbose): echo "r< ", cast[seq[char]](line)
-      if line.len == 0 or line == "\r\n":
-        break
-      yield line
+
+proc body*(response: Response | AsyncResponse): string =
+  ## get body all at once
+  for data in body():
+    result.add(data)
 
 proc recvStream*(response: Response): void =
   ## use this to return a stream of data
