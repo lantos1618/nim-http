@@ -6,17 +6,17 @@ import
   streams,
   uri,
   strutils,
-  os,
-  jsony,
-  print
+  os
+
+export httpcore, uri
 
 type
   HttpClient* = object
-    uri: Uri
+    sslContext*: SslContext
+
+  AsyncHttpClient* = object
     sslContext: SslContext
 
-  Async* = object
-  Sync* = object
   Greeting* = object
     httpVersion: HttpVersion
     httpCode: HttpCode
@@ -63,7 +63,7 @@ proc initUnixSocket*(uri: Uri | string): Socket =
 
 proc initSocket(uri: Uri): Socket =
   var uri = uri
-  var port = if uri.port != "": Port(uri.port.parseInt()) 
+  var port = if uri.port != "": Port(uri.port.parseInt())
     elif uri.scheme == "https": Port(443)
     else: Port(80)
   if uri.scheme == "unix":
@@ -72,42 +72,47 @@ proc initSocket(uri: Uri): Socket =
 
 proc initAsyncSocket(uri: Uri): Future[AsyncSocket] {.async.} =
   var uri = uri
-  var port = if uri.port != "": Port(uri.port.parseInt()) 
+  var port = if uri.port != "": Port(uri.port.parseInt())
     elif uri.scheme == "https": Port(443)
     else: Port(80)
   if uri.scheme == "unix":
     return await initAsyncUnixSocket(uri)
   return await asyncnet.dial(uri.hostname, port)
 
-proc sendGreeting(socket: Socket | AsyncSocket, httpMethod: HttpMethod, path: string): Future[void] {.multisync.} =
+proc sendGreeting(socket: Socket | AsyncSocket, httpMethod: HttpMethod,
+    path: string): Future[void] {.multisync.} =
   let message = $httpMethod & " " & path & " HTTP/1.1\r\n"
   when defined(verbose): echo "> ", message
   await socket.send(message)
 
-proc sendHeaders(socket: Socket | AsyncSocket, headers: HttpHeaders): Future[void] {.multisync.} =
+proc sendHeaders(socket: Socket | AsyncSocket, headers: HttpHeaders): Future[
+    void] {.multisync.} =
   for key, value in headers:
     when defined(verbose): echo "h> ", key, ": ", value
     await socket.send(key & ": " & value & "\r\n")
   await socket.send("\r\n")
 
-proc sendBody(socket: Socket | AsyncSocket, body: string): Future[void] {.multisync.} =
+proc sendBody(socket: Socket | AsyncSocket, body: string): Future[
+    void] {.multisync.} =
   # TODO: chunked encoding
   await socket.send(body)
 
-proc recvGreeting(socket: Socket | AsyncSocket): Future[Greeting] {.multisync.} =
+proc recvGreeting(socket: Socket | AsyncSocket): Future[
+    Greeting] {.multisync.} =
   var line = await socket.recvLine()
   var parts = line.split(" ")
   if not parts.len >= 3:
     raise newException(HttpError, "Invalid greeting: " & line)
   if parts[0] != "HTTP/1.1":
     raise newException(HttpError, "Invalid greeting: " & line)
-  
+
   result.httpVersion = HttpVer11
   result.httpCode = HttpCode(parts[1].parseInt())
   result.ok = result.httpCode == Http200
   result.message = parts[2..parts.high].join(" ")
 
-proc recvHeaders(socket: Socket | AsyncSocket): Future[HttpHeaders] {.multisync.} =
+proc recvHeaders(socket: Socket | AsyncSocket): Future[
+    HttpHeaders] {.multisync.} =
   result = newHttpHeaders()
   while true:
     var line = await socket.recvLine()
@@ -130,7 +135,7 @@ proc recvChunk*(socket: Socket | AsyncSocket): Future[Chunk] {.multisync.} =
     result.size = fromHex[int](chunkHeader[0..chunkHeaderSpacePos-1])
     let chunkExtention = chunkHeader[chunkHeaderSpacePos+1..chunkHeader.high]
     raise newException(HttpError, "chunk extention not supported: " & chunkExtention)
-  
+
   # pass the data of expected size
   result.data = await socket.recv(result.size)
   when defined(verbose): echo "cd< ", cast[seq[char]](result.data)
@@ -142,17 +147,19 @@ proc recvChunk*(socket: Socket | AsyncSocket): Future[Chunk] {.multisync.} =
   if expectedNewLine != "\r\n":
     raise newException(HttpError, "expected \\r\\n but got: " & expectedNewLine)
 
-proc recvData*(response: Response | AsyncResponse): Future[string] {.multisync.} =
+proc recvData*(response: Response | AsyncResponse): Future[
+    string] {.multisync.} =
   ## recv one part of return data
   ## use proc body() to get all data
   ## use iterator body() to stream data from chunks
   var chunked = response.headers.getOrDefault("Transfer-Encoding").contains("chunked")
-  var contentLength = if response.headers.hasKey("Content-Length"): response.headers["Content-Length"].parseInt() else: -1
+  var contentLength = if response.headers.hasKey(
+      "Content-Length"): response.headers["Content-Length"].parseInt() else: -1
   if chunked:
     var chunk = await response.socket.recvChunk()
     return chunk.data
-  
-  if contentLength > 0: 
+
+  if contentLength > 0:
     let line = await response.socket.recv(contentLength)
     when defined(verbose): echo "cl< ", cast[seq[char]](line)
     return line
@@ -173,9 +180,9 @@ iterator body*(response: Response | AsyncResponse): string =
       break
     yield line
 
-proc body*(response: Response | AsyncResponse): string =
+proc body*(response: Response | AsyncResponse): Future[string] {.multisync.} =
   ## get body all at once
-  for data in body():
+  for data in response.body():
     result.add(data)
 
 proc recvStream*(response: Response): void =
@@ -186,16 +193,16 @@ proc recvStream*(response: Response): void =
   defer: response.stream.close()
   for data in response.recvData():
     response.stream.write(data)
-  
+
 let defaultHeaders = {
   "user-agent": "nim-httpclient/0.1",
   "Accept": "*/*",
 }
 
 proc fetch*(
-    client: Sync | Async,
-    httpMethod: HttpMethod,
+    client: HttpClient | AsyncHttpClient,
     uri: Uri | string,
+    httpMethod: HttpMethod,
     body: string = "",
     # multiPart: MultiPart
     headers: HttpHeaders = newHttpHeaders(defaultHeaders),
@@ -204,12 +211,14 @@ proc fetch*(
   # set up the uri
   var uri = when uri is string: parseUri(uri) else: uri
   # set up the socket
-  var socket = when client is Sync: initSocket(uri) else: await initAsyncSocket(uri) 
+  var socket = when client is HttpClient: initSocket(uri) else: await initAsyncSocket(uri)
   when defined(ssl):
     if uri.scheme == "https":
-      let sslContext = if sslContext != nil: sslContext else: newContext()
+      var sslContext = if client.sslContext != nil: client.sslContext else: newContext()
+      sslContext = if sslContext != nil: sslContext else: newContext()
       wrapConnectedSocket(sslContext, socket, handshakeAsClient, uri.hostname)
-  
+
+
   # make sure we have a host header
   if not headers.hasKey("Host"):
     headers.add("Host", uri.hostname)
@@ -222,7 +231,7 @@ proc fetch*(
   await socket.sendHeaders(headers)
   await socket.sendBody(body)
 
-  
+
   let greeting = await socket.recvGreeting()
   let headers = await socket.recvHeaders()
 
@@ -231,8 +240,8 @@ proc fetch*(
   result.socket = socket
 
 proc mainAsync() {.async.} =
-  var client: Async
-  var response = await client.fetch(HttpGet, "http://info.cern.ch/hypertext/WWW/TheProject.html")
+  var client: AsyncHttpClient
+  var response = await client.fetch("http://info.cern.ch/hypertext/WWW/TheProject.html", HttpGet)
   for data in response.body():
     echo data
 
@@ -241,8 +250,8 @@ proc mainAsync() {.async.} =
     "Accept": "*/*",
     "Host": "v1.41",
   })
-  let path = Uri(scheme: "unix", hostname: "/var/run/docker.sock", path: "/v1.41/containers/json")
-  response = await client.fetch(HttpGet, path, headers= headers)
+  let uri = Uri(scheme: "unix", hostname: "/var/run/docker.sock", path: "/v1.41/containers/json")
+  response = await client.fetch(uri, HttpGet, headers = headers)
   for data in response.body():
     echo data
 
