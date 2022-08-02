@@ -146,11 +146,11 @@ proc recvData*(response: Response | AsyncResponse): Future[string] {.multisync.}
   ## recv one part of return data
   ## use proc body() to get all data
   ## use iterator body() to stream data from chunks
- var chunked = response.headers.getOrDefault("Transfer-Encoding").contains("chunked")
+  var chunked = response.headers.getOrDefault("Transfer-Encoding").contains("chunked")
   var contentLength = if response.headers.hasKey("Content-Length"): response.headers["Content-Length"].parseInt() else: -1
   if chunked:
     var chunk = await response.socket.recvChunk()
-    return chunk
+    return chunk.data
   
   if contentLength > 0: 
     let line = await response.socket.recv(contentLength)
@@ -169,7 +169,7 @@ iterator body*(response: Response | AsyncResponse): string =
   ## if you want to work with streams use recvStream instead which implements this iterator
   while true:
     let line = when response is Response: response.recvData() else: waitFor response.recvData()
-    if line.len == 0 or line.data in ["", "\r\n"]:
+    if line.len == 0 or line in ["", "\r\n"]:
       break
     yield line
 
@@ -233,7 +233,7 @@ proc fetch*(
 proc mainAsync() {.async.} =
   var client: Async
   var response = await client.fetch(HttpGet, "http://info.cern.ch/hypertext/WWW/TheProject.html")
-  for data in response.recvData():
+  for data in response.body():
     echo data
 
   let headers = newHttpHeaders({
@@ -243,7 +243,7 @@ proc mainAsync() {.async.} =
   })
   let path = Uri(scheme: "unix", hostname: "/var/run/docker.sock", path: "/v1.41/containers/json")
   response = await client.fetch(HttpGet, path, headers= headers)
-  for data in response.recvData():
+  for data in response.body():
     echo data
 
 when isMainModule:

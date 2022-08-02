@@ -1,4 +1,4 @@
-# nim-http
+# nim_http
 An alternate http client for nim
 why?
 - add unix socket support

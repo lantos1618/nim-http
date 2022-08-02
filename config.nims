@@ -1,3 +1,3 @@
 # switch("threads", "on")
-patchFile("stdlib", "net", "src/nim_docker_api/patches/net.nim")
-patchFile("stdlib", "asyncnet", "src/nim_docker_api/patches/asyncnet.nim")
+patchFile("stdlib", "net", "nim_http/src/patches/net.nim")
+patchFile("stdlib", "asyncnet", "nim_http/src/patches/asyncnet.nim")
